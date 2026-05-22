@@ -1,8 +1,8 @@
 import os
 import time
 import logging
+import threading
 from typing import List, Literal, Dict, Any, Optional
-from functools import lru_cache
 from datetime import datetime, timezone
 
 import requests
@@ -77,22 +77,29 @@ def _ttl_bucket(ttl_minutes: int) -> int:
     return int(time.time() // seconds)
 
 
-# ---------- Cache & API Fetch ----------
-@lru_cache(maxsize=256)
-def _fetch_prices_cached(
+# ---------- Cache-Infrastruktur ----------
+# Struktur eines Eintrags: {"data": [...], "bucket": int, "has_next_day": bool}
+_price_cache: Dict[tuple, dict] = {}
+_cache_lock = threading.Lock()
+_cache_stats = {"hits": 0, "misses": 0}
+
+
+def _in_no_cache_window() -> bool:
+    """True zwischen 12:00:00 UTC und 13:29:59 UTC (kein Caching)."""
+    now = datetime.now(timezone.utc)
+    return (now.hour == 12) or (now.hour == 13 and now.minute < 30)
+
+
+# ---------- API Fetch (ohne Cache) ----------
+def _fetch_prices_from_api(
     api_url: str,
     resolution_api: str,
     token: str,
     fixed_cost_cent: float,
     vat_percent: float,
-    ttl_bucket_value: int,
     convert_to_utc: bool = True,
 ) -> List[dict]:
-    """
-    Holt Daten von der Energyforecast-API, gecacht über TTL.
-    ttl_bucket_value dient nur dazu, Cache-Invalidierung auszulösen.
-    convert_to_utc: Wenn True, werden Zeitstempel zu UTC-Z konvertiert, sonst bleiben sie im Original-Format
-    """
+    """Holt Daten direkt von der Energyforecast-API (kein Cache)."""
     params = {
         "token": token,
         "resolution": resolution_api,
@@ -130,6 +137,47 @@ def _fetch_prices_cached(
         out.append({"start": start, "end": end, "value": value})
     logger.info(f"Successfully fetched {len(out)} price entries")
     return out
+
+
+# ---------- Cache-bewusster Abruf ----------
+def _get_prices_cached(
+    api_url: str,
+    resolution_api: str,
+    token: str,
+    fixed_cost_cent: float,
+    vat_percent: float,
+    convert_to_utc: bool,
+    ttl_minutes: int,
+) -> List[dict]:
+    """
+    Gibt gecachte Preise zurück oder holt neue Daten von der API.
+
+    Kein-Cache-Fenster (12:00–13:30 UTC):
+      - Cache wird weder gelesen noch geschrieben.
+      - Jeder Request holt frische Daten von der API.
+
+    Außerhalb des Fensters: normales TTL-basiertes Caching.
+    """
+    key = (api_url, resolution_api, token, fixed_cost_cent, vat_percent, convert_to_utc)
+
+    if not _in_no_cache_window():
+        now_bucket = _ttl_bucket(ttl_minutes)
+        with _cache_lock:
+            entry = _price_cache.get(key)
+        if entry is not None and entry["bucket"] == now_bucket:
+            _cache_stats["hits"] += 1
+            return entry["data"]
+    else:
+        logger.info("No-cache window aktiv (12:00–13:30 UTC) – Cache wird umgangen")
+
+    _cache_stats["misses"] += 1
+    data = _fetch_prices_from_api(api_url, resolution_api, token, fixed_cost_cent, vat_percent, convert_to_utc)
+
+    if not _in_no_cache_window():
+        with _cache_lock:
+            _price_cache[key] = {"data": data, "bucket": _ttl_bucket(ttl_minutes)}
+
+    return data
 
 
 # ---------- Hauptendpunkte ----------
@@ -197,20 +245,20 @@ def get_prices(
         resolution_api = _res_to_api(resolution)
         vat_percent = _vat_to_percent(vat)
         fixed_cost_cent = _fixed_to_cent(fixed_cost)
-        ttlb = _ttl_bucket(cache_ttl_minutes)
 
         # evcc Format benötigt Original-Zeitstempel, default Format UTC-Z
         convert_to_utc = (resultformat == "default")
 
-        prices = _fetch_prices_cached(
+        prices = _get_prices_cached(
             api_url,
             resolution_api,
             token,
             fixed_cost_cent,
             vat_percent,
-            ttlb,
             convert_to_utc,
+            cache_ttl_minutes,
         )
+
         if price_cap is not None:
             prices = [
                 {**p, "value": min(p["value"], price_cap)}
@@ -239,14 +287,15 @@ def health() -> Dict[str, Any]:
     Gibt 200 OK und Cache-Statusinformationen zurück.
     """
     logger.debug("Health check requested")
-    cache_info = _fetch_prices_cached.cache_info()
+    with _cache_lock:
+        cached_entries = len(_price_cache)
     return {
         "status": "ok",
         "service": APP_TITLE,
-        "cached_entries": cache_info.currsize,
-        "cache_hits": cache_info.hits,
-        "cache_misses": cache_info.misses,
-        "ttl_check_bucket": _ttl_bucket(1),
+        "cached_entries": cached_entries,
+        "cache_hits": _cache_stats["hits"],
+        "cache_misses": _cache_stats["misses"],
+        "no_cache_window_active": _in_no_cache_window(),
         "timestamp": datetime.utcnow().isoformat() + "Z",
     }
 
