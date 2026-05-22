@@ -554,16 +554,30 @@ def _apply_simple_request(cfg: dict) -> List[dict]:
 
 
 @app.get("/simple/prices", tags=["simple"], response_model=Dict[str, List[dict]])
-def simple_prices():
+def simple_prices(
+    resultformat: Optional[Literal["default", "evcc"]] = Query(None, description="Ausgabeformat überschreiben (Standard: ENERGYFORECAST_RESULT_FORMAT)"),
+    tz: Optional[str] = Query(None, description="Ausgabe-Zeitzone überschreiben (Standard: ENERGYFORECAST_TZ)"),
+):
     """
     Liefert alle Preise auf Basis der Umgebungsvariablen-Konfiguration.
     Kein Query-Parameter nötig – ideal für lokale Deployments.
+    resultformat und tz können optional überschrieben werden.
     """
     try:
         cfg = _simple_config_or_503()
-        prices, resultformat = _apply_simple_request(cfg)
-        logger.info(f"Simple /prices: {len(prices)} Einträge, format={resultformat}")
-        return {"rates": prices} if resultformat == "evcc" else {"prices": prices}
+        if tz is not None:
+            try:
+                ZoneInfo(tz)
+            except ZoneInfoNotFoundError:
+                raise HTTPException(status_code=400, detail=f"Unbekannte Zeitzone: '{tz}'")
+        effective_cfg = {**cfg}
+        if resultformat is not None:
+            effective_cfg["resultformat"] = resultformat
+        if tz is not None:
+            effective_cfg["tz"] = tz
+        prices, fmt = _apply_simple_request(effective_cfg)
+        logger.info(f"Simple /prices: {len(prices)} Einträge, format={fmt}")
+        return {"rates": prices} if fmt == "evcc" else {"prices": prices}
     except HTTPException:
         raise
     except Exception as e:
@@ -572,18 +586,27 @@ def simple_prices():
 
 
 @app.get("/simple/current", tags=["simple"], response_model=Dict[str, Any])
-def simple_current():
+def simple_current(
+    resultformat: Optional[Literal["default", "evcc"]] = Query(None, description="Ausgabeformat überschreiben (Standard: ENERGYFORECAST_RESULT_FORMAT)"),
+    tz: Optional[str] = Query(None, description="Ausgabe-Zeitzone überschreiben (Standard: ENERGYFORECAST_TZ)"),
+):
     """
     Liefert den aktuell gültigen Preis auf Basis der Umgebungsvariablen-Konfiguration.
     Trifft immer den Cache – kein direkter API-Aufruf außer bei Cache-Miss.
+    resultformat und tz können optional überschrieben werden.
     """
     try:
         cfg = _simple_config_or_503()
-
+        if tz is not None:
+            try:
+                ZoneInfo(tz)
+            except ZoneInfoNotFoundError:
+                raise HTTPException(status_code=400, detail=f"Unbekannte Zeitzone: '{tz}'")
         api_url = _endpoint_for_horizon(cfg["horizon"])
         resolution_api = _res_to_api(cfg["resolution"])
-        resultformat = cfg["resultformat"]
-        output_tz = cfg["tz"] if cfg["tz"] is not None else ("UTC" if resultformat == "default" else None)
+        resultformat = resultformat if resultformat is not None else cfg["resultformat"]
+        effective_tz = tz if tz is not None else cfg["tz"]
+        output_tz = effective_tz if effective_tz is not None else ("UTC" if resultformat == "default" else None)
 
         raw_prices = _get_prices_cached(
             api_url, resolution_api, cfg["token"],
