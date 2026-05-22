@@ -38,6 +38,63 @@ API_BASE = "https://www.energyforecast.de/api/v1/predictions"
 app = FastAPI(title=APP_TITLE)
 
 
+# ---------- Simple-Modus: Konfiguration aus Umgebungsvariablen ----------
+def _load_simple_config() -> Optional[dict]:
+    """
+    Liest Konfiguration für den Simple-Modus aus Umgebungsvariablen.
+    Gibt None zurück, wenn ENERGYFORECAST_TOKEN nicht gesetzt ist.
+
+    Variablen:
+      ENERGYFORECAST_TOKEN            API-Token (Pflicht für Simple-Modus)
+      ENERGYFORECAST_HORIZON          48 oder 96 (Standard: 96)
+      ENERGYFORECAST_RESOLUTION       hourly | quarter_hourly (Standard: hourly)
+      ENERGYFORECAST_FIXED_COST       EUR/kWh, z. B. 0.16774 (Standard: 0.0)
+      ENERGYFORECAST_VAT              z. B. 0.19 oder 19 (Standard: 0.19)
+      ENERGYFORECAST_PRICE_CAP        EUR/kWh, optional
+      ENERGYFORECAST_CACHE_TTL        Minuten (Standard: 60)
+      ENERGYFORECAST_RESULT_FORMAT    default | evcc (Standard: default)
+      ENERGYFORECAST_TZ               IANA-Zeitzone, z. B. Europe/Berlin (optional)
+    """
+    token = os.getenv("ENERGYFORECAST_TOKEN")
+    if not token:
+        return None
+
+    price_cap_raw = os.getenv("ENERGYFORECAST_PRICE_CAP")
+    tz_raw = os.getenv("ENERGYFORECAST_TZ")
+
+    return {
+        "token": token,
+        "horizon": int(os.getenv("ENERGYFORECAST_HORIZON", "96")),
+        "resolution": os.getenv("ENERGYFORECAST_RESOLUTION", "hourly"),
+        "fixed_cost": float(os.getenv("ENERGYFORECAST_FIXED_COST", "0.0")),
+        "vat": float(os.getenv("ENERGYFORECAST_VAT", "0.19")),
+        "price_cap": float(price_cap_raw) if price_cap_raw else None,
+        "cache_ttl_minutes": int(os.getenv("ENERGYFORECAST_CACHE_TTL", "60")),
+        "resultformat": os.getenv("ENERGYFORECAST_RESULT_FORMAT", "default"),
+        "tz": tz_raw if tz_raw else None,
+    }
+
+
+_SIMPLE_CONFIG: Optional[dict] = None
+
+
+@app.on_event("startup")
+def _init_simple_config():
+    global _SIMPLE_CONFIG
+    _SIMPLE_CONFIG = _load_simple_config()
+    if _SIMPLE_CONFIG:
+        logger.info(
+            f"Simple-Modus aktiv: horizon={_SIMPLE_CONFIG['horizon']}, "
+            f"resolution={_SIMPLE_CONFIG['resolution']}, "
+            f"fixed_cost={_SIMPLE_CONFIG['fixed_cost']}, "
+            f"vat={_SIMPLE_CONFIG['vat']}, "
+            f"format={_SIMPLE_CONFIG['resultformat']}, "
+            f"tz={_SIMPLE_CONFIG['tz']}"
+        )
+    else:
+        logger.info("Simple-Modus inaktiv (ENERGYFORECAST_TOKEN nicht gesetzt)")
+
+
 # ---------- Hilfsfunktionen ----------
 def _endpoint_for_horizon(horizon_hours: int) -> str:
     """Wählt den richtigen Endpunkt je nach Stundenhorizont."""
@@ -217,8 +274,27 @@ def index():
   <h2>Endpunkte</h2>
   <table>
     <tr><th>Pfad</th><th>Beschreibung</th></tr>
-    <tr><td><code>GET /prices</code></td><td>Strompreis-Vorhersage abrufen</td></tr>
+    <tr><td><code>GET /prices</code></td><td>Strompreis-Vorhersage abrufen (alle Parameter als Query-Parameter)</td></tr>
+    <tr><td><code>GET /current</code></td><td>Aktuellen Preis abrufen (alle Parameter als Query-Parameter)</td></tr>
+    <tr><td><code>GET /simple/prices</code></td><td>Alle Preise – Konfiguration aus Umgebungsvariablen</td></tr>
+    <tr><td><code>GET /simple/current</code></td><td>Aktueller Preis – Konfiguration aus Umgebungsvariablen</td></tr>
     <tr><td><code>GET /health</code></td><td>Dienststatus und Cache-Statistiken</td></tr>
+  </table>
+
+  <h2>Simple-Modus (lokales Deployment)</h2>
+  <p>Wenn <code>ENERGYFORECAST_TOKEN</code> gesetzt ist, sind <code>/simple/prices</code> und
+     <code>/simple/current</code> ohne Query-Parameter nutzbar:</p>
+  <table>
+    <tr><th>Umgebungsvariable</th><th>Standard</th><th>Beschreibung</th></tr>
+    <tr><td><code>ENERGYFORECAST_TOKEN</code></td><td><em>Pflicht</em></td><td>API-Token für energyforecast.de</td></tr>
+    <tr><td><code>ENERGYFORECAST_HORIZON</code></td><td>96</td><td>48 oder 96 Stunden</td></tr>
+    <tr><td><code>ENERGYFORECAST_RESOLUTION</code></td><td>hourly</td><td><code>hourly</code> oder <code>quarter_hourly</code></td></tr>
+    <tr><td><code>ENERGYFORECAST_FIXED_COST</code></td><td>0.0</td><td>Fixkosten in EUR/kWh</td></tr>
+    <tr><td><code>ENERGYFORECAST_VAT</code></td><td>0.19</td><td>Mehrwertsteuer (0.19 oder 19)</td></tr>
+    <tr><td><code>ENERGYFORECAST_PRICE_CAP</code></td><td>–</td><td>Preisobergrenze in EUR/kWh (optional)</td></tr>
+    <tr><td><code>ENERGYFORECAST_CACHE_TTL</code></td><td>60</td><td>Cache-Gültigkeit in Minuten</td></tr>
+    <tr><td><code>ENERGYFORECAST_RESULT_FORMAT</code></td><td>default</td><td><code>default</code> oder <code>evcc</code></td></tr>
+    <tr><td><code>ENERGYFORECAST_TZ</code></td><td>–</td><td>Ausgabe-Zeitzone, z.&nbsp;B. <code>Europe/Berlin</code></td></tr>
   </table>
 
   <h2>Parameter <code>/prices</code></h2>
@@ -434,6 +510,97 @@ def get_current(
         raise
     except Exception as e:
         logger.exception(f"Unexpected error in get_current: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _simple_config_or_503():
+    """Gibt die Simple-Konfiguration zurück oder wirft 503, wenn nicht konfiguriert."""
+    if not _SIMPLE_CONFIG:
+        raise HTTPException(
+            status_code=503,
+            detail="Simple-Modus nicht aktiv. Bitte ENERGYFORECAST_TOKEN (und optional weitere ENERGYFORECAST_*-Variablen) setzen."
+        )
+    return _SIMPLE_CONFIG
+
+
+def _apply_simple_request(cfg: dict) -> List[dict]:
+    """Führt den Abruf mit Simple-Konfiguration durch."""
+    api_url = _endpoint_for_horizon(cfg["horizon"])
+    resolution_api = _res_to_api(cfg["resolution"])
+    vat_percent = _vat_to_percent(cfg["vat"])
+    fixed_cost_cent = _fixed_to_cent(cfg["fixed_cost"])
+    resultformat = cfg["resultformat"]
+    output_tz = cfg["tz"] if cfg["tz"] is not None else ("UTC" if resultformat == "default" else None)
+
+    prices = _get_prices_cached(
+        api_url, resolution_api, cfg["token"], fixed_cost_cent, vat_percent,
+        output_tz, cfg["cache_ttl_minutes"],
+        skip_cache_read=_in_no_cache_window(),
+    )
+
+    if cfg["price_cap"] is not None:
+        prices = [{**p, "value": min(p["value"], cfg["price_cap"])} for p in prices]
+
+    return prices, resultformat
+
+
+@app.get("/simple/prices", tags=["simple"], response_model=Dict[str, List[dict]])
+def simple_prices():
+    """
+    Liefert alle Preise auf Basis der Umgebungsvariablen-Konfiguration.
+    Kein Query-Parameter nötig – ideal für lokale Deployments.
+    """
+    try:
+        cfg = _simple_config_or_503()
+        prices, resultformat = _apply_simple_request(cfg)
+        logger.info(f"Simple /prices: {len(prices)} Einträge, format={resultformat}")
+        return {"rates": prices} if resultformat == "evcc" else {"prices": prices}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Fehler in simple_prices: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/simple/current", tags=["simple"], response_model=Dict[str, Any])
+def simple_current():
+    """
+    Liefert den aktuell gültigen Preis auf Basis der Umgebungsvariablen-Konfiguration.
+    Trifft immer den Cache – kein direkter API-Aufruf außer bei Cache-Miss.
+    """
+    try:
+        cfg = _simple_config_or_503()
+
+        api_url = _endpoint_for_horizon(cfg["horizon"])
+        resolution_api = _res_to_api(cfg["resolution"])
+        vat_percent = _vat_to_percent(cfg["vat"])
+        fixed_cost_cent = _fixed_to_cent(cfg["fixed_cost"])
+        resultformat = cfg["resultformat"]
+        output_tz = cfg["tz"] if cfg["tz"] is not None else ("UTC" if resultformat == "default" else None)
+
+        prices = _get_prices_cached(
+            api_url, resolution_api, cfg["token"], fixed_cost_cent, vat_percent,
+            output_tz, cfg["cache_ttl_minutes"],
+            skip_cache_read=False,
+        )
+
+        if cfg["price_cap"] is not None:
+            prices = [{**p, "value": min(p["value"], cfg["price_cap"])} for p in prices]
+
+        now = datetime.now(timezone.utc)
+        for entry in prices:
+            s, e = entry["start"], entry["end"]
+            start_dt = datetime.fromisoformat(s[:-1] + "+00:00" if s.endswith("Z") else s)
+            end_dt = datetime.fromisoformat(e[:-1] + "+00:00" if e.endswith("Z") else e)
+            if start_dt <= now < end_dt:
+                logger.info(f"Simple /current: {entry['value']} EUR/kWh")
+                return entry
+
+        raise HTTPException(status_code=404, detail="Kein Preis für den aktuellen Zeitpunkt gefunden")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Fehler in simple_current: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
