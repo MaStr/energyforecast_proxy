@@ -133,14 +133,24 @@ def _res_to_api(resolution: str) -> str:
     return "HOURLY"
 
 
-def _vat_to_percent(vat: float) -> float:
-    """Konvertiert z. B. 0.19 → 19.0 falls nötig."""
-    return vat * 100.0 if vat <= 1.0 else vat
-
-
-def _fixed_to_cent(fixed_cost_eur: float) -> float:
-    """Konvertiert Fixkosten Euro → Cent (API erwartet Cent)."""
-    return round(fixed_cost_eur * 100.0, 6)
+def _apply_costs(
+    raw_prices: List[dict],
+    fixed_net_cost: float,
+    markup_costs: float,
+    fixed_cost_other: float,
+    vat: float,
+) -> List[dict]:
+    """
+    Wendet Fixkosten und MwSt. lokal auf Netto-Spotpreise an.
+    Formel: (spot + fixed_net_cost + markup_costs + fixed_cost_other) * (1 + vat)
+    vat kann als Faktor (0.19) oder Prozent (19) übergeben werden.
+    """
+    vat_factor = (vat / 100.0) if vat > 1.0 else vat
+    total_fixed = fixed_net_cost + markup_costs + fixed_cost_other
+    return [
+        {**p, "value": round((p["value"] + total_fixed) * (1 + vat_factor), 6)}
+        for p in raw_prices
+    ]
 
 
 def _ttl_bucket(ttl_minutes: int) -> int:
@@ -168,16 +178,12 @@ def _fetch_prices_from_api(
     api_url: str,
     resolution_api: str,
     token: str,
-    fixed_cost_cent: float,
-    vat_percent: float,
     output_tz: Optional[str] = "UTC",
 ) -> List[dict]:
-    """Holt Daten direkt von der Energyforecast-API (kein Cache)."""
+    """Holt Netto-Spotpreise direkt von der Energyforecast-API (kein Cache, keine Kostenberechnung)."""
     params = {
         "token": token,
         "resolution": resolution_api,
-        "fixed_cost_cent": fixed_cost_cent,
-        "vat": vat_percent,
     }
     logger.info(f"Fetching prices from {api_url} with resolution={resolution_api}")
     try:
@@ -213,23 +219,20 @@ def _get_prices_cached(
     api_url: str,
     resolution_api: str,
     token: str,
-    fixed_cost_cent: float,
-    vat_percent: float,
     output_tz: Optional[str],
     ttl_minutes: int,
     skip_cache_read: bool = False,
 ) -> List[dict]:
     """
-    Gibt gecachte Preise zurück oder holt neue Daten von der API.
-    Das Ergebnis wird immer in den Cache geschrieben.
+    Gibt gecachte Netto-Spotpreise zurück oder holt neue Daten von der API.
+    Der Cache speichert ausschließlich Rohdaten – Fixkosten und MwSt. werden
+    nach dem Cache-Zugriff lokal durch _apply_costs() berechnet.
 
-    skip_cache_read=True  → Cache-Lesen überspringen, frisch von der API holen
-                            (für /prices im No-Cache-Fenster: immer aktuell, aber
-                             Ergebnis landet im Cache für /current)
-    skip_cache_read=False → Normales TTL-Caching: erst Cache prüfen, bei Miss holen
-                            (/current nutzt immer diesen Modus)
+    skip_cache_read=True  → Cache-Lesen überspringen, frisch von der API holen,
+                            Ergebnis trotzdem in den Cache schreiben.
+    skip_cache_read=False → Normales TTL-Caching.
     """
-    key = (api_url, resolution_api, token, fixed_cost_cent, vat_percent, output_tz)
+    key = (api_url, resolution_api, token, output_tz)
     now_bucket = _ttl_bucket(ttl_minutes)
 
     if not skip_cache_read:
@@ -242,7 +245,7 @@ def _get_prices_cached(
         logger.info("No-cache window aktiv (12:00–13:30 UTC) – Cache-Lesen übersprungen")
 
     _cache_stats["misses"] += 1
-    data = _fetch_prices_from_api(api_url, resolution_api, token, fixed_cost_cent, vat_percent, output_tz)
+    data = _fetch_prices_from_api(api_url, resolution_api, token, output_tz)
 
     with _cache_lock:
         _price_cache[key] = {"data": data, "bucket": now_bucket}
@@ -410,21 +413,13 @@ def get_prices(
         logger.info(f"Request: horizon={horizon}, resolution={resolution}, net={fixed_net_cost}, markup={markup_costs}, other={fixed_cost_other}, vat={vat}")
         api_url = _endpoint_for_horizon(horizon)
         resolution_api = _res_to_api(resolution)
-        vat_percent = _vat_to_percent(vat)
-        fixed_cost_cent = _fixed_to_cent(fixed_net_cost + markup_costs + fixed_cost_other)
-
         output_tz = tz if tz is not None else ("UTC" if resultformat == "default" else None)
 
-        prices = _get_prices_cached(
-            api_url,
-            resolution_api,
-            token,
-            fixed_cost_cent,
-            vat_percent,
-            output_tz,
-            cache_ttl_minutes,
+        raw_prices = _get_prices_cached(
+            api_url, resolution_api, token, output_tz, cache_ttl_minutes,
             skip_cache_read=_in_no_cache_window(),
         )
+        prices = _apply_costs(raw_prices, fixed_net_cost, markup_costs, fixed_cost_other, vat)
 
         if price_cap is not None:
             prices = [
@@ -494,14 +489,13 @@ def get_current(
 
         api_url = _endpoint_for_horizon(horizon)
         resolution_api = _res_to_api(resolution)
-        vat_percent = _vat_to_percent(vat)
-        fixed_cost_cent = _fixed_to_cent(fixed_net_cost + markup_costs + fixed_cost_other)
         output_tz = tz if tz is not None else ("UTC" if resultformat == "default" else None)
 
-        prices = _get_prices_cached(
-            api_url, resolution_api, token, fixed_cost_cent, vat_percent, output_tz, cache_ttl_minutes,
+        raw_prices = _get_prices_cached(
+            api_url, resolution_api, token, output_tz, cache_ttl_minutes,
             skip_cache_read=False,
         )
+        prices = _apply_costs(raw_prices, fixed_net_cost, markup_costs, fixed_cost_other, vat)
 
         if price_cap is not None:
             prices = [{**p, "value": min(p["value"], price_cap)} for p in prices]
@@ -538,16 +532,15 @@ def _apply_simple_request(cfg: dict) -> List[dict]:
     """Führt den Abruf mit Simple-Konfiguration durch."""
     api_url = _endpoint_for_horizon(cfg["horizon"])
     resolution_api = _res_to_api(cfg["resolution"])
-    vat_percent = _vat_to_percent(cfg["vat"])
-    fixed_cost_cent = _fixed_to_cent(cfg["fixed_net_cost"] + cfg["markup_costs"] + cfg["fixed_cost_other"])
     resultformat = cfg["resultformat"]
     output_tz = cfg["tz"] if cfg["tz"] is not None else ("UTC" if resultformat == "default" else None)
 
-    prices = _get_prices_cached(
-        api_url, resolution_api, cfg["token"], fixed_cost_cent, vat_percent,
+    raw_prices = _get_prices_cached(
+        api_url, resolution_api, cfg["token"],
         output_tz, cfg["cache_ttl_minutes"],
         skip_cache_read=_in_no_cache_window(),
     )
+    prices = _apply_costs(raw_prices, cfg["fixed_net_cost"], cfg["markup_costs"], cfg["fixed_cost_other"], cfg["vat"])
 
     if cfg["price_cap"] is not None:
         prices = [{**p, "value": min(p["value"], cfg["price_cap"])} for p in prices]
@@ -584,16 +577,15 @@ def simple_current():
 
         api_url = _endpoint_for_horizon(cfg["horizon"])
         resolution_api = _res_to_api(cfg["resolution"])
-        vat_percent = _vat_to_percent(cfg["vat"])
-        fixed_cost_cent = _fixed_to_cent(cfg["fixed_net_cost"] + cfg["markup_costs"] + cfg["fixed_cost_other"])
         resultformat = cfg["resultformat"]
         output_tz = cfg["tz"] if cfg["tz"] is not None else ("UTC" if resultformat == "default" else None)
 
-        prices = _get_prices_cached(
-            api_url, resolution_api, cfg["token"], fixed_cost_cent, vat_percent,
+        raw_prices = _get_prices_cached(
+            api_url, resolution_api, cfg["token"],
             output_tz, cfg["cache_ttl_minutes"],
             skip_cache_read=False,
         )
+        prices = _apply_costs(raw_prices, cfg["fixed_net_cost"], cfg["markup_costs"], cfg["fixed_cost_other"], cfg["vat"])
 
         if cfg["price_cap"] is not None:
             prices = [{**p, "value": min(p["value"], cfg["price_cap"])} for p in prices]
