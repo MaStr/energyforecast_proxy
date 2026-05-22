@@ -154,34 +154,35 @@ def _get_prices_cached(
     vat_percent: float,
     output_tz: Optional[str],
     ttl_minutes: int,
+    skip_cache_read: bool = False,
 ) -> List[dict]:
     """
     Gibt gecachte Preise zurück oder holt neue Daten von der API.
+    Das Ergebnis wird immer in den Cache geschrieben.
 
-    Kein-Cache-Fenster (12:00–13:30 UTC):
-      - Cache wird weder gelesen noch geschrieben.
-      - Jeder Request holt frische Daten von der API.
-
-    Außerhalb des Fensters: normales TTL-basiertes Caching.
+    skip_cache_read=True  → Cache-Lesen überspringen, frisch von der API holen
+                            (für /prices im No-Cache-Fenster: immer aktuell, aber
+                             Ergebnis landet im Cache für /current)
+    skip_cache_read=False → Normales TTL-Caching: erst Cache prüfen, bei Miss holen
+                            (/current nutzt immer diesen Modus)
     """
     key = (api_url, resolution_api, token, fixed_cost_cent, vat_percent, output_tz)
+    now_bucket = _ttl_bucket(ttl_minutes)
 
-    if not _in_no_cache_window():
-        now_bucket = _ttl_bucket(ttl_minutes)
+    if not skip_cache_read:
         with _cache_lock:
             entry = _price_cache.get(key)
         if entry is not None and entry["bucket"] == now_bucket:
             _cache_stats["hits"] += 1
             return entry["data"]
     else:
-        logger.info("No-cache window aktiv (12:00–13:30 UTC) – Cache wird umgangen")
+        logger.info("No-cache window aktiv (12:00–13:30 UTC) – Cache-Lesen übersprungen")
 
     _cache_stats["misses"] += 1
     data = _fetch_prices_from_api(api_url, resolution_api, token, fixed_cost_cent, vat_percent, output_tz)
 
-    if not _in_no_cache_window():
-        with _cache_lock:
-            _price_cache[key] = {"data": data, "bucket": _ttl_bucket(ttl_minutes)}
+    with _cache_lock:
+        _price_cache[key] = {"data": data, "bucket": now_bucket}
 
     return data
 
@@ -337,6 +338,7 @@ def get_prices(
             vat_percent,
             output_tz,
             cache_ttl_minutes,
+            skip_cache_read=_in_no_cache_window(),
         )
 
         if price_cap is not None:
@@ -410,7 +412,8 @@ def get_current(
         output_tz = tz if tz is not None else ("UTC" if resultformat == "default" else None)
 
         prices = _get_prices_cached(
-            api_url, resolution_api, token, fixed_cost_cent, vat_percent, output_tz, cache_ttl_minutes
+            api_url, resolution_api, token, fixed_cost_cent, vat_percent, output_tz, cache_ttl_minutes,
+            skip_cache_read=False,
         )
 
         if price_cap is not None:
