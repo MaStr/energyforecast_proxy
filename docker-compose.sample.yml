@@ -1,0 +1,29 @@
+services:
+  energy-forecast-proxy:
+    image: ghcr.io/mastr/energyforecast_proxy:latest
+    restart: unless-stopped
+    # Simple-Modus: Konfiguration über Umgebungsvariablen
+    # environment:
+    #   ENERGYFORECAST_TOKEN: "dein-token"
+    #   ENERGYFORECAST_FIXED_NET_COST: "0.08"
+    #   ENERGYFORECAST_MARKUP_COSTS: "0.01"
+    #   ENERGYFORECAST_FIXED_COST_OTHER: "0.0"
+    #   ENERGYFORECAST_VAT: "0.19"
+    #   ENERGYFORECAST_TZ: "Europe/Berlin"
+    #   ENERGYFORECAST_RESULT_FORMAT: "evcc"
+    ports:
+      - "8000:8000"
+    # Beispiel: Traefik-Integration (Labels nach Bedarf anpassen)
+    # networks:
+    #   - traefik
+    # labels:
+    #   - "traefik.enable=true"
+    #   - "traefik.http.routers.energyproxy.rule=Host(`energyforecast.example.com`)"
+    #   - "traefik.http.routers.energyproxy.entryPoints=websecure"
+    #   - "traefik.http.routers.energyproxy.tls.certresolver=lets-encrypt"
+    #   - "traefik.http.services.energyproxy.loadbalancer.server.port=8000"
+
+# networks:
+#   traefik:
+#     external:
+#       name: traefik_proxy
