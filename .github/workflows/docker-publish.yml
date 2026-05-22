@@ -19,6 +19,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set lowercase image name
+        run: echo "IMAGE=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
@@ -36,7 +39,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository }}
+          images: ${{ env.IMAGE }}
           labels: |
             org.opencontainers.image.title=Energyforecast Proxy
             org.opencontainers.image.description=Proxy für energyforecast.de mit lokaler Preisberechnung, Caching und evcc-Support
@@ -53,7 +56,7 @@ jobs:
           context: energyforecast
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
-          outputs: type=image,name=ghcr.io/${{ github.repository }},push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=${{ matrix.platform }}
           cache-to: type=gha,scope=${{ matrix.platform }},mode=max
 
@@ -76,6 +79,9 @@ jobs:
     needs: build
 
     steps:
+      - name: Set lowercase image name
+        run: echo "IMAGE=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+
       - name: Download digests
         uses: actions/download-artifact@v4
         with:
@@ -97,7 +103,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository }}
+          images: ${{ env.IMAGE }}
           tags: |
             type=raw,value=latest
             type=sha,prefix=sha-
@@ -107,4 +113,4 @@ jobs:
         run: |
           docker buildx imagetools create \
             $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf 'ghcr.io/${{ github.repository }}@sha256:%s ' *)
+            $(printf '${{ env.IMAGE }}@sha256:%s ' *)
