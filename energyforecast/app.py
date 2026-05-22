@@ -48,7 +48,9 @@ def _load_simple_config() -> Optional[dict]:
       ENERGYFORECAST_TOKEN            API-Token (Pflicht für Simple-Modus)
       ENERGYFORECAST_HORIZON          48 oder 96 (Standard: 96)
       ENERGYFORECAST_RESOLUTION       hourly | quarter_hourly (Standard: hourly)
-      ENERGYFORECAST_FIXED_COST       EUR/kWh, z. B. 0.16774 (Standard: 0.0)
+      ENERGYFORECAST_FIXED_NET_COST   Netzgebühren in EUR/kWh, z. B. 0.08 (Standard: 0.0)
+      ENERGYFORECAST_MARKUP_COSTS     Anbieter-Aufschlag in EUR/kWh, z. B. 0.01 (Standard: 0.0)
+      ENERGYFORECAST_FIXED_COST_OTHER Sonstige Fixkosten in EUR/kWh (Standard: 0.0)
       ENERGYFORECAST_VAT              z. B. 0.19 oder 19 (Standard: 0.19)
       ENERGYFORECAST_PRICE_CAP        EUR/kWh, optional
       ENERGYFORECAST_CACHE_TTL        Minuten (Standard: 60)
@@ -66,7 +68,9 @@ def _load_simple_config() -> Optional[dict]:
         "token": token,
         "horizon": int(os.getenv("ENERGYFORECAST_HORIZON", "96")),
         "resolution": os.getenv("ENERGYFORECAST_RESOLUTION", "hourly"),
-        "fixed_cost": float(os.getenv("ENERGYFORECAST_FIXED_COST", "0.0")),
+        "fixed_net_cost": float(os.getenv("ENERGYFORECAST_FIXED_NET_COST", "0.0")),
+        "markup_costs": float(os.getenv("ENERGYFORECAST_MARKUP_COSTS", "0.0")),
+        "fixed_cost_other": float(os.getenv("ENERGYFORECAST_FIXED_COST_OTHER", "0.0")),
         "vat": float(os.getenv("ENERGYFORECAST_VAT", "0.19")),
         "price_cap": float(price_cap_raw) if price_cap_raw else None,
         "cache_ttl_minutes": int(os.getenv("ENERGYFORECAST_CACHE_TTL", "60")),
@@ -86,7 +90,9 @@ def _init_simple_config():
         logger.info(
             f"Simple-Modus aktiv: horizon={_SIMPLE_CONFIG['horizon']}, "
             f"resolution={_SIMPLE_CONFIG['resolution']}, "
-            f"fixed_cost={_SIMPLE_CONFIG['fixed_cost']}, "
+            f"fixed_net_cost={_SIMPLE_CONFIG['fixed_net_cost']}, "
+            f"markup_costs={_SIMPLE_CONFIG['markup_costs']}, "
+            f"fixed_cost_other={_SIMPLE_CONFIG['fixed_cost_other']}, "
             f"vat={_SIMPLE_CONFIG['vat']}, "
             f"format={_SIMPLE_CONFIG['resultformat']}, "
             f"tz={_SIMPLE_CONFIG['tz']}"
@@ -289,7 +295,9 @@ def index():
     <tr><td><code>ENERGYFORECAST_TOKEN</code></td><td><em>Pflicht</em></td><td>API-Token für energyforecast.de</td></tr>
     <tr><td><code>ENERGYFORECAST_HORIZON</code></td><td>96</td><td>48 oder 96 Stunden</td></tr>
     <tr><td><code>ENERGYFORECAST_RESOLUTION</code></td><td>hourly</td><td><code>hourly</code> oder <code>quarter_hourly</code></td></tr>
-    <tr><td><code>ENERGYFORECAST_FIXED_COST</code></td><td>0.0</td><td>Fixkosten in EUR/kWh</td></tr>
+    <tr><td><code>ENERGYFORECAST_FIXED_NET_COST</code></td><td>0.0</td><td>Netzgebühren in EUR/kWh</td></tr>
+    <tr><td><code>ENERGYFORECAST_MARKUP_COSTS</code></td><td>0.0</td><td>Anbieter-Aufschlag in EUR/kWh</td></tr>
+    <tr><td><code>ENERGYFORECAST_FIXED_COST_OTHER</code></td><td>0.0</td><td>Sonstige Fixkosten in EUR/kWh</td></tr>
     <tr><td><code>ENERGYFORECAST_VAT</code></td><td>0.19</td><td>Mehrwertsteuer (0.19 oder 19)</td></tr>
     <tr><td><code>ENERGYFORECAST_PRICE_CAP</code></td><td>–</td><td>Preisobergrenze in EUR/kWh (optional)</td></tr>
     <tr><td><code>ENERGYFORECAST_CACHE_TTL</code></td><td>60</td><td>Cache-Gültigkeit in Minuten</td></tr>
@@ -303,7 +311,9 @@ def index():
     <tr><td><code>token</code></td><td>string</td><td><em>Pflicht</em></td><td>API-Token für energyforecast.de</td></tr>
     <tr><td><code>horizon</code></td><td>int</td><td>96</td><td>Zeithorizont in Stunden: <code>48</code> oder <code>96</code></td></tr>
     <tr><td><code>resolution</code></td><td>string</td><td>hourly</td><td><code>hourly</code> (stündlich) oder <code>quarter_hourly</code> (15 min)</td></tr>
-    <tr><td><code>fixed_cost</code></td><td>float</td><td>0.0</td><td>Fixkosten in EUR/kWh, die auf jeden Preis addiert werden (z.&nbsp;B. <code>0.16774</code> für 16,774&nbsp;ct/kWh). Enthält Netzentgelt, Abgaben etc.</td></tr>
+    <tr><td><code>fixed_net_cost</code></td><td>float</td><td>0.0</td><td>Netzgebühren in EUR/kWh (z.&nbsp;B. <code>0.08</code>)</td></tr>
+    <tr><td><code>markup_costs</code></td><td>float</td><td>0.0</td><td>Anbieter-Aufschlag in EUR/kWh (z.&nbsp;B. <code>0.01</code> für 1&nbsp;ct/kWh)</td></tr>
+    <tr><td><code>fixed_cost_other</code></td><td>float</td><td>0.0</td><td>Sonstige Fixkosten in EUR/kWh</td></tr>
     <tr><td><code>vat</code></td><td>float</td><td>0.19</td><td>Mehrwertsteuer als Faktor (<code>0.19</code>) oder Prozent (<code>19</code>). Wird auf den Gesamtpreis (Spot + Fixkosten) angewendet.</td></tr>
     <tr><td><code>price_cap</code></td><td>float</td><td>–</td><td>Preisobergrenze in EUR/kWh nach Steuern und Gebühren. Preise darüber werden auf diesen Wert gedeckelt.</td></tr>
     <tr><td><code>cache_ttl_minutes</code></td><td>int</td><td>60</td><td>Cache-Gültigkeit in Minuten (1–1440). Zwischen 12:00 und 13:30 UTC wird der Cache immer umgangen.</td></tr>
@@ -321,11 +331,11 @@ def index():
 
   <div class="note">
     In beiden Formaten ist <code>value</code> der Endpreis in <strong>EUR/kWh</strong>
-    (Spot-Preis + <code>fixed_cost</code>, inkl. MwSt., ggf. gedeckelt durch <code>price_cap</code>).
+    (Spot-Preis + <code>fixed_net_cost</code> + <code>markup_costs</code> + <code>fixed_cost_other</code>, inkl. MwSt., ggf. gedeckelt durch <code>price_cap</code>).
   </div>
 
   <h2>Beispielaufruf</h2>
-  <pre>GET /prices?token=DEIN_TOKEN&amp;horizon=96&amp;fixed_cost=0.16774&amp;vat=0.19&amp;resultformat=evcc</pre>
+  <pre>GET /prices?token=DEIN_TOKEN&amp;horizon=96&amp;fixed_net_cost=0.08&amp;markup_costs=0.01&amp;vat=0.19&amp;resultformat=evcc</pre>
 </body>
 </html>"""
 
@@ -346,10 +356,9 @@ def get_prices(
         "hourly", description="Zeitauflösung"
     ),
     token: str = Query(..., description="API-Token für energyforecast.de"),
-    fixed_cost: float = Query(
-        0.0,
-        description="Fixkosten in Euro/kWh (z. B. 0.16774 für 16.774 ct/kWh)"
-    ),
+    fixed_net_cost: float = Query(0.0, description="Netzgebühren in EUR/kWh (z. B. 0.08)"),
+    markup_costs: float = Query(0.0, description="Anbieter-Aufschlag in EUR/kWh (z. B. 0.01 für 1 ct/kWh)"),
+    fixed_cost_other: float = Query(0.0, description="Sonstige Fixkosten in EUR/kWh"),
     vat: float = Query(
         0.19, description="Mehrwertsteuer (0.19 oder 19)."
     ),
@@ -398,11 +407,11 @@ def get_prices(
                 ZoneInfo(tz)
             except ZoneInfoNotFoundError:
                 raise HTTPException(status_code=400, detail=f"Unbekannte Zeitzone: '{tz}'")
-        logger.info(f"Request: horizon={horizon}, resolution={resolution}, fixed_cost={fixed_cost}, vat={vat}")
+        logger.info(f"Request: horizon={horizon}, resolution={resolution}, net={fixed_net_cost}, markup={markup_costs}, other={fixed_cost_other}, vat={vat}")
         api_url = _endpoint_for_horizon(horizon)
         resolution_api = _res_to_api(resolution)
         vat_percent = _vat_to_percent(vat)
-        fixed_cost_cent = _fixed_to_cent(fixed_cost)
+        fixed_cost_cent = _fixed_to_cent(fixed_net_cost + markup_costs + fixed_cost_other)
 
         output_tz = tz if tz is not None else ("UTC" if resultformat == "default" else None)
 
@@ -451,7 +460,9 @@ def get_current(
     horizon: int = Query(96, description="Zeithorizont in Stunden (48 oder 96)."),
     resolution: Literal["hourly", "quarter_hourly"] = Query("hourly", description="Zeitauflösung"),
     token: str = Query(..., description="API-Token für energyforecast.de"),
-    fixed_cost: float = Query(0.0, description="Fixkosten in Euro/kWh (z. B. 0.16774 für 16.774 ct/kWh)"),
+    fixed_net_cost: float = Query(0.0, description="Netzgebühren in EUR/kWh (z. B. 0.08)"),
+    markup_costs: float = Query(0.0, description="Anbieter-Aufschlag in EUR/kWh (z. B. 0.01 für 1 ct/kWh)"),
+    fixed_cost_other: float = Query(0.0, description="Sonstige Fixkosten in EUR/kWh"),
     vat: float = Query(0.19, description="Mehrwertsteuer (0.19 oder 19)."),
     cache_ttl_minutes: int = Query(60, ge=1, le=24 * 60, description="Cache-Gültigkeit in Minuten"),
     resultformat: Literal["default", "evcc"] = Query(
@@ -484,7 +495,7 @@ def get_current(
         api_url = _endpoint_for_horizon(horizon)
         resolution_api = _res_to_api(resolution)
         vat_percent = _vat_to_percent(vat)
-        fixed_cost_cent = _fixed_to_cent(fixed_cost)
+        fixed_cost_cent = _fixed_to_cent(fixed_net_cost + markup_costs + fixed_cost_other)
         output_tz = tz if tz is not None else ("UTC" if resultformat == "default" else None)
 
         prices = _get_prices_cached(
@@ -528,7 +539,7 @@ def _apply_simple_request(cfg: dict) -> List[dict]:
     api_url = _endpoint_for_horizon(cfg["horizon"])
     resolution_api = _res_to_api(cfg["resolution"])
     vat_percent = _vat_to_percent(cfg["vat"])
-    fixed_cost_cent = _fixed_to_cent(cfg["fixed_cost"])
+    fixed_cost_cent = _fixed_to_cent(cfg["fixed_net_cost"] + cfg["markup_costs"] + cfg["fixed_cost_other"])
     resultformat = cfg["resultformat"]
     output_tz = cfg["tz"] if cfg["tz"] is not None else ("UTC" if resultformat == "default" else None)
 
@@ -574,7 +585,7 @@ def simple_current():
         api_url = _endpoint_for_horizon(cfg["horizon"])
         resolution_api = _res_to_api(cfg["resolution"])
         vat_percent = _vat_to_percent(cfg["vat"])
-        fixed_cost_cent = _fixed_to_cent(cfg["fixed_cost"])
+        fixed_cost_cent = _fixed_to_cent(cfg["fixed_net_cost"] + cfg["markup_costs"] + cfg["fixed_cost_other"])
         resultformat = cfg["resultformat"]
         output_tz = cfg["tz"] if cfg["tz"] is not None else ("UTC" if resultformat == "default" else None)
 
