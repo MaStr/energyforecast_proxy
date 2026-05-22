@@ -282,7 +282,8 @@ def index():
 <body>
   <h1>Energyforecast.de Proxy</h1>
   <p>Proxy für die <a href="https://www.energyforecast.de">energyforecast.de</a> API.
-     Liefert Strompreis-Vorhersagen mit optionalem Fixkosten-Aufschlag, MwSt. und Preisobergrenze.</p>
+     Liefert Strompreis-Vorhersagen mit optionalem Fixkosten-Aufschlag, MwSt. und Preisobergrenze.
+     &nbsp;·&nbsp; <a href="https://github.com/MaStr/energyforecast_proxy">GitHub</a></p>
 
   <h2>Endpunkte</h2>
   <table>
