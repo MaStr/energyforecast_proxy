@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 import requests
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import HTMLResponse
 
 # Logging konfigurieren
 LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -181,6 +182,71 @@ def _get_prices_cached(
 
 
 # ---------- Hauptendpunkte ----------
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+def index():
+    """Nutzungshinweis für den Proxy."""
+    return """<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Energyforecast Proxy</title>
+  <style>
+    body { font-family: sans-serif; max-width: 860px; margin: 40px auto; padding: 0 20px; color: #222; }
+    h1 { font-size: 1.5rem; }
+    h2 { font-size: 1.1rem; margin-top: 2em; border-bottom: 1px solid #ddd; padding-bottom: 4px; }
+    table { border-collapse: collapse; width: 100%; margin-top: 0.5em; }
+    th, td { text-align: left; padding: 6px 10px; border: 1px solid #ddd; font-size: 0.9rem; }
+    th { background: #f5f5f5; }
+    code { background: #f0f0f0; padding: 2px 5px; border-radius: 3px; font-size: 0.9em; }
+    pre { background: #f0f0f0; padding: 12px; border-radius: 4px; overflow-x: auto; font-size: 0.85em; }
+    .note { background: #fff8e1; border-left: 3px solid #f0ad00; padding: 8px 12px; margin-top: 1em; font-size: 0.9em; }
+  </style>
+</head>
+<body>
+  <h1>Energyforecast.de Proxy</h1>
+  <p>Proxy für die <a href="https://www.energyforecast.de">energyforecast.de</a> API.
+     Liefert Strompreis-Vorhersagen mit optionalem Fixkosten-Aufschlag, MwSt. und Preisobergrenze.</p>
+
+  <h2>Endpunkte</h2>
+  <table>
+    <tr><th>Pfad</th><th>Beschreibung</th></tr>
+    <tr><td><code>GET /prices</code></td><td>Strompreis-Vorhersage abrufen</td></tr>
+    <tr><td><code>GET /health</code></td><td>Dienststatus und Cache-Statistiken</td></tr>
+  </table>
+
+  <h2>Parameter <code>/prices</code></h2>
+  <table>
+    <tr><th>Parameter</th><th>Typ</th><th>Standard</th><th>Beschreibung</th></tr>
+    <tr><td><code>token</code></td><td>string</td><td><em>Pflicht</em></td><td>API-Token für energyforecast.de</td></tr>
+    <tr><td><code>horizon</code></td><td>int</td><td>96</td><td>Zeithorizont in Stunden: <code>48</code> oder <code>96</code></td></tr>
+    <tr><td><code>resolution</code></td><td>string</td><td>hourly</td><td><code>hourly</code> (stündlich) oder <code>quarter_hourly</code> (15 min)</td></tr>
+    <tr><td><code>fixed_cost</code></td><td>float</td><td>0.0</td><td>Fixkosten in EUR/kWh, die auf jeden Preis addiert werden (z.&nbsp;B. <code>0.16774</code> für 16,774&nbsp;ct/kWh). Enthält Netzentgelt, Abgaben etc.</td></tr>
+    <tr><td><code>vat</code></td><td>float</td><td>0.19</td><td>Mehrwertsteuer als Faktor (<code>0.19</code>) oder Prozent (<code>19</code>). Wird auf den Gesamtpreis (Spot + Fixkosten) angewendet.</td></tr>
+    <tr><td><code>price_cap</code></td><td>float</td><td>–</td><td>Preisobergrenze in EUR/kWh nach Steuern und Gebühren. Preise darüber werden auf diesen Wert gedeckelt.</td></tr>
+    <tr><td><code>cache_ttl_minutes</code></td><td>int</td><td>60</td><td>Cache-Gültigkeit in Minuten (1–1440). Zwischen 12:00 und 13:30 UTC wird der Cache immer umgangen.</td></tr>
+    <tr><td><code>resultformat</code></td><td>string</td><td>default</td><td>Ausgabeformat – siehe unten</td></tr>
+  </table>
+
+  <h2>Ausgabeformat: <code>resultformat</code></h2>
+  <p><strong><code>default</code></strong> – Zeitstempel werden nach UTC konvertiert, Schlüssel ist <code>prices</code>:</p>
+  <pre>{ "prices": [ { "start": "2024-01-01T12:00:00Z", "end": "2024-01-01T13:00:00Z", "value": 0.2843 } ] }</pre>
+
+  <p><strong><code>evcc</code></strong> – Zeitstempel bleiben im Original-Format der API (mit Zeitzonenoffset), Schlüssel ist <code>rates</code>.
+     Dieses Format ist kompatibel mit dem <a href="https://docs.evcc.io">evcc</a>-Tarif-Interface:</p>
+  <pre>{ "rates": [ { "start": "2024-01-01T13:00:00+01:00", "end": "2024-01-01T14:00:00+01:00", "value": 0.2843 } ] }</pre>
+
+  <div class="note">
+    In beiden Formaten ist <code>value</code> der Endpreis in <strong>EUR/kWh</strong>
+    (Spot-Preis + <code>fixed_cost</code>, inkl. MwSt., ggf. gedeckelt durch <code>price_cap</code>).
+  </div>
+
+  <h2>Beispielaufruf</h2>
+  <pre>GET /prices?token=DEIN_TOKEN&amp;horizon=96&amp;fixed_cost=0.16774&amp;vat=0.19&amp;resultformat=evcc</pre>
+</body>
+</html>"""
+
+
 @app.get(
     "/prices",
     response_model=Dict[str, List[dict]],  # { "prices": [ ... ] }
