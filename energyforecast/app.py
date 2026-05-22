@@ -4,6 +4,7 @@ import logging
 import threading
 from typing import List, Literal, Dict, Any, Optional
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import requests
 from fastapi import FastAPI, HTTPException, Query
@@ -45,11 +46,18 @@ def _endpoint_for_horizon(horizon_hours: int) -> str:
     return f"{API_BASE}/next_96_hours"
 
 
-def _to_utc_z(dt_str: str) -> str:
-    """Wandelt ISO-String mit Zeitzone in UTC-Z-Format."""
-    dt = datetime.fromisoformat(dt_str)
-    dt_utc = dt.astimezone(timezone.utc).replace(microsecond=0)
-    return dt_utc.isoformat().replace("+00:00", "Z")
+def _convert_timestamp(dt_str: str, tz_name: Optional[str]) -> str:
+    """
+    Konvertiert einen ISO-Zeitstempel in die gewünschte Zeitzone.
+    tz_name=None  → Zeitstempel unverändert zurückgeben
+    tz_name="UTC" → UTC mit Z-Suffix (z. B. 2024-01-01T13:00:00Z)
+    tz_name=...   → Lokale Zeit mit Offset (z. B. 2024-01-01T14:00:00+01:00)
+    """
+    if tz_name is None:
+        return dt_str
+    dt = datetime.fromisoformat(dt_str).astimezone(ZoneInfo(tz_name)).replace(microsecond=0)
+    iso = dt.isoformat()
+    return iso.replace("+00:00", "Z") if tz_name == "UTC" else iso
 
 
 def _res_to_api(resolution: str) -> str:
@@ -99,7 +107,7 @@ def _fetch_prices_from_api(
     token: str,
     fixed_cost_cent: float,
     vat_percent: float,
-    convert_to_utc: bool = True,
+    output_tz: Optional[str] = "UTC",
 ) -> List[dict]:
     """Holt Daten direkt von der Energyforecast-API (kein Cache)."""
     params = {
@@ -129,12 +137,8 @@ def _fetch_prices_from_api(
 
     out = []
     for item in data:
-        if convert_to_utc:
-            start = _to_utc_z(item["start"])
-            end = _to_utc_z(item["end"])
-        else:
-            start = item["start"]
-            end = item["end"]
+        start = _convert_timestamp(item["start"], output_tz)
+        end = _convert_timestamp(item["end"], output_tz)
         value = float(item["price"])  # Euro/kWh
         out.append({"start": start, "end": end, "value": value})
     logger.info(f"Successfully fetched {len(out)} price entries")
@@ -148,7 +152,7 @@ def _get_prices_cached(
     token: str,
     fixed_cost_cent: float,
     vat_percent: float,
-    convert_to_utc: bool,
+    output_tz: Optional[str],
     ttl_minutes: int,
 ) -> List[dict]:
     """
@@ -160,7 +164,7 @@ def _get_prices_cached(
 
     Außerhalb des Fensters: normales TTL-basiertes Caching.
     """
-    key = (api_url, resolution_api, token, fixed_cost_cent, vat_percent, convert_to_utc)
+    key = (api_url, resolution_api, token, fixed_cost_cent, vat_percent, output_tz)
 
     if not _in_no_cache_window():
         now_bucket = _ttl_bucket(ttl_minutes)
@@ -173,7 +177,7 @@ def _get_prices_cached(
         logger.info("No-cache window aktiv (12:00–13:30 UTC) – Cache wird umgangen")
 
     _cache_stats["misses"] += 1
-    data = _fetch_prices_from_api(api_url, resolution_api, token, fixed_cost_cent, vat_percent, convert_to_utc)
+    data = _fetch_prices_from_api(api_url, resolution_api, token, fixed_cost_cent, vat_percent, output_tz)
 
     if not _in_no_cache_window():
         with _cache_lock:
@@ -227,6 +231,7 @@ def index():
     <tr><td><code>price_cap</code></td><td>float</td><td>–</td><td>Preisobergrenze in EUR/kWh nach Steuern und Gebühren. Preise darüber werden auf diesen Wert gedeckelt.</td></tr>
     <tr><td><code>cache_ttl_minutes</code></td><td>int</td><td>60</td><td>Cache-Gültigkeit in Minuten (1–1440). Zwischen 12:00 und 13:30 UTC wird der Cache immer umgangen.</td></tr>
     <tr><td><code>resultformat</code></td><td>string</td><td>default</td><td>Ausgabeformat – siehe unten</td></tr>
+    <tr><td><code>tz</code></td><td>string</td><td>–</td><td>Ausgabe-Zeitzone für Zeitstempel (IANA-Name, z.&nbsp;B. <code>Europe/Berlin</code> oder <code>UTC</code>). Standard: <code>UTC</code> bei <code>default</code>-Format, Original-Offset der API bei <code>evcc</code>.</td></tr>
   </table>
 
   <h2>Ausgabeformat: <code>resultformat</code></h2>
@@ -280,6 +285,9 @@ def get_prices(
     price_cap: Optional[float] = Query(
         None, description="Preisobergrenze in EUR/kWh nach Steuern und Gebühren. Preise darüber werden auf diesen Wert gedeckelt."
     ),
+    tz: Optional[str] = Query(
+        None, description="Ausgabe-Zeitzone für Zeitstempel (z. B. 'Europe/Berlin', 'UTC'). Standard: UTC für default-Format, Original-Offset für evcc."
+    ),
 ):
     """
     Proxy für:
@@ -308,14 +316,18 @@ def get_prices(
             raise HTTPException(status_code=400, detail="horizon must be 48 or 96")
 
         _request_counts["prices"] += 1
+        if tz is not None:
+            try:
+                ZoneInfo(tz)
+            except ZoneInfoNotFoundError:
+                raise HTTPException(status_code=400, detail=f"Unbekannte Zeitzone: '{tz}'")
         logger.info(f"Request: horizon={horizon}, resolution={resolution}, fixed_cost={fixed_cost}, vat={vat}")
         api_url = _endpoint_for_horizon(horizon)
         resolution_api = _res_to_api(resolution)
         vat_percent = _vat_to_percent(vat)
         fixed_cost_cent = _fixed_to_cent(fixed_cost)
 
-        # evcc Format benötigt Original-Zeitstempel, default Format UTC-Z
-        convert_to_utc = (resultformat == "default")
+        output_tz = tz if tz is not None else ("UTC" if resultformat == "default" else None)
 
         prices = _get_prices_cached(
             api_url,
@@ -323,7 +335,7 @@ def get_prices(
             token,
             fixed_cost_cent,
             vat_percent,
-            convert_to_utc,
+            output_tz,
             cache_ttl_minutes,
         )
 
@@ -370,6 +382,9 @@ def get_current(
     price_cap: Optional[float] = Query(
         None, description="Preisobergrenze in EUR/kWh nach Steuern und Gebühren."
     ),
+    tz: Optional[str] = Query(
+        None, description="Ausgabe-Zeitzone für Zeitstempel (z. B. 'Europe/Berlin', 'UTC'). Standard: UTC für default-Format, Original-Offset für evcc."
+    ),
 ):
     """
     Gibt den Strompreis für den aktuellen Zeitpunkt zurück.
@@ -380,6 +395,11 @@ def get_current(
     """
     try:
         _request_counts["current"] += 1
+        if tz is not None:
+            try:
+                ZoneInfo(tz)
+            except ZoneInfoNotFoundError:
+                raise HTTPException(status_code=400, detail=f"Unbekannte Zeitzone: '{tz}'")
         if horizon not in (48, 96):
             raise HTTPException(status_code=400, detail="horizon must be 48 or 96")
 
@@ -387,10 +407,10 @@ def get_current(
         resolution_api = _res_to_api(resolution)
         vat_percent = _vat_to_percent(vat)
         fixed_cost_cent = _fixed_to_cent(fixed_cost)
-        convert_to_utc = (resultformat == "default")
+        output_tz = tz if tz is not None else ("UTC" if resultformat == "default" else None)
 
         prices = _get_prices_cached(
-            api_url, resolution_api, token, fixed_cost_cent, vat_percent, convert_to_utc, cache_ttl_minutes
+            api_url, resolution_api, token, fixed_cost_cent, vat_percent, output_tz, cache_ttl_minutes
         )
 
         if price_cap is not None:

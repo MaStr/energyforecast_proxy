@@ -18,7 +18,7 @@ COPY app.py /app/app.py
 
 # Install dependencies
 # (fastapi, uvicorn, requests)
-RUN pip install --no-cache-dir fastapi uvicorn[standard] requests
+RUN pip install --no-cache-dir fastapi uvicorn[standard] requests tzdata
 
 # Expose port
 EXPOSE 8000
