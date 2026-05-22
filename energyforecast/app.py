@@ -180,10 +180,14 @@ def _fetch_prices_from_api(
     token: str,
     output_tz: Optional[str] = "UTC",
 ) -> List[dict]:
-    """Holt Netto-Spotpreise direkt von der Energyforecast-API (kein Cache, keine Kostenberechnung)."""
+    """Holt Netto-Spotpreise direkt von der Energyforecast-API (kein Cache, keine Kostenberechnung).
+    fixed_cost_cent=0 und vat=0 werden explizit übergeben, damit die API den reinen Spotpreis
+    zurückgibt – unabhängig davon ob die Parameter serverseitig Pflicht sind."""
     params = {
         "token": token,
         "resolution": resolution_api,
+        "fixed_cost_cent": 0,
+        "vat": 0,
     }
     logger.info(f"Fetching prices from {api_url} with resolution={resolution_api}")
     try:
