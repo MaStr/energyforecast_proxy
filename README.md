@@ -29,7 +29,7 @@ Docker-Image: `ghcr.io/mastr/energyforecast_proxy:latest` (amd64 + arm64)
 | `markup_costs`      | float  | `0.0`     | Anbieter-Aufschlag in EUR/kWh (z. B. `0.01` für 1 ct/kWh)         |
 | `fixed_cost_other`  | float  | `0.0`     | Sonstige Fixkosten in EUR/kWh                                       |
 | `vat`               | float  | `0.19`    | Mehrwertsteuer als Faktor (`0.19`) oder Prozent (`19`)              |
-| `price_cap`         | float  | –         | Preisobergrenze in EUR/kWh nach Steuern/Gebühren (optional)        |
+| `price_cap`         | float  | –         | Preisobergrenze in EUR/kWh **brutto** (nach Steuern & Gebühren, optional) |
 | `cache_ttl_minutes` | int    | `60`      | Cache-Gültigkeit in Minuten (1–1440)                                |
 | `resultformat`      | string | `default` | Ausgabeformat: `default` oder `evcc`                                |
 | `tz`                | string | –         | Ausgabe-Zeitzone (IANA, z. B. `Europe/Berlin`). Standard: UTC       |
@@ -70,7 +70,7 @@ Query-Parameter nutzbar. Ideal für Home-Automation-Setups (evcc, ioBroker, Node
 | `ENERGYFORECAST_MARKUP_COSTS`  | `0.0`     | Anbieter-Aufschlag in EUR/kWh (z. B. `0.01`)             |
 | `ENERGYFORECAST_FIXED_COST_OTHER` | `0.0`  | Sonstige Fixkosten in EUR/kWh                             |
 | `ENERGYFORECAST_VAT`           | `0.19`    | Mehrwertsteuer (`0.19` oder `19`)                         |
-| `ENERGYFORECAST_PRICE_CAP`     | –         | Preisobergrenze in EUR/kWh (optional)                     |
+| `ENERGYFORECAST_PRICE_CAP`     | –         | Preisobergrenze in EUR/kWh **brutto** (nach Steuern & Gebühren, optional) |
 | `ENERGYFORECAST_CACHE_TTL`     | `60`      | Cache-Gültigkeit in Minuten                               |
 | `ENERGYFORECAST_RESULT_FORMAT` | `default` | `default` oder `evcc`                                     |
 | `ENERGYFORECAST_TZ`            | –         | Ausgabe-Zeitzone, z. B. `Europe/Berlin`                   |

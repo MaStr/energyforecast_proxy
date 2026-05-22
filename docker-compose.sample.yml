@@ -19,7 +19,7 @@ services:
       # ENERGYFORECAST_MARKUP_COSTS: "0.01"    # Anbieter-Aufschlag in EUR/kWh (z. B. 1 ct/kWh)
       # ENERGYFORECAST_FIXED_COST_OTHER: "0.0" # Sonstige Fixkosten in EUR/kWh
       # ENERGYFORECAST_VAT: "0.19"             # MwSt. als Faktor (0.19) oder Prozent (19)
-      # ENERGYFORECAST_PRICE_CAP: ""           # Preisobergrenze in EUR/kWh nach Steuern (optional)
+      # ENERGYFORECAST_PRICE_CAP: ""           # Preisobergrenze in EUR/kWh brutto (nach Steuern & Gebühren, optional)
 
       # --- Cache & Ausgabe ---
       # ENERGYFORECAST_CACHE_TTL: "60"         # Cache-Gültigkeit in Minuten (Standard: 60)
