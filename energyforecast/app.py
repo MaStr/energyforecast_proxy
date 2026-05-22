@@ -346,6 +346,71 @@ def get_prices(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get(
+    "/current",
+    response_model=Dict[str, Any],
+    responses={
+        200: {"description": "OK"},
+        404: {"description": "Kein Preis für den aktuellen Zeitpunkt gefunden"},
+        500: {"description": "Fehler beim Abruf oder bei der Verarbeitung"},
+    },
+)
+def get_current(
+    horizon: int = Query(96, description="Zeithorizont in Stunden (48 oder 96)."),
+    resolution: Literal["hourly", "quarter_hourly"] = Query("hourly", description="Zeitauflösung"),
+    token: str = Query(..., description="API-Token für energyforecast.de"),
+    fixed_cost: float = Query(0.0, description="Fixkosten in Euro/kWh (z. B. 0.16774 für 16.774 ct/kWh)"),
+    vat: float = Query(0.19, description="Mehrwertsteuer (0.19 oder 19)."),
+    cache_ttl_minutes: int = Query(60, ge=1, le=24 * 60, description="Cache-Gültigkeit in Minuten"),
+    resultformat: Literal["default", "evcc"] = Query(
+        "default", description="Ausgabeformat: 'default' oder 'evcc'"
+    ),
+    price_cap: Optional[float] = Query(
+        None, description="Preisobergrenze in EUR/kWh nach Steuern und Gebühren."
+    ),
+):
+    """
+    Gibt den Strompreis für den aktuellen Zeitpunkt zurück.
+    Greift auf denselben Cache wie /prices zurück.
+
+    Antwort:
+    { "start": "...Z", "end": "...Z", "value": <EUR/kWh> }
+    """
+    try:
+        if horizon not in (48, 96):
+            raise HTTPException(status_code=400, detail="horizon must be 48 or 96")
+
+        api_url = _endpoint_for_horizon(horizon)
+        resolution_api = _res_to_api(resolution)
+        vat_percent = _vat_to_percent(vat)
+        fixed_cost_cent = _fixed_to_cent(fixed_cost)
+        convert_to_utc = (resultformat == "default")
+
+        prices = _get_prices_cached(
+            api_url, resolution_api, token, fixed_cost_cent, vat_percent, convert_to_utc, cache_ttl_minutes
+        )
+
+        if price_cap is not None:
+            prices = [{**p, "value": min(p["value"], price_cap)} for p in prices]
+
+        now = datetime.now(timezone.utc)
+        for entry in prices:
+            s = entry["start"]
+            e = entry["end"]
+            start_dt = datetime.fromisoformat(s[:-1] + "+00:00" if s.endswith("Z") else s)
+            end_dt = datetime.fromisoformat(e[:-1] + "+00:00" if e.endswith("Z") else e)
+            if start_dt <= now < end_dt:
+                logger.info(f"Current price: {entry['value']} EUR/kWh at {now.isoformat()}")
+                return entry
+
+        raise HTTPException(status_code=404, detail="Kein Preis für den aktuellen Zeitpunkt gefunden")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Unexpected error in get_current: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/health", tags=["system"])
 def health() -> Dict[str, Any]:
     """
