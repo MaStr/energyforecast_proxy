@@ -25,6 +25,14 @@ services:
       # ENERGYFORECAST_CACHE_TTL: "60"         # Cache-Gültigkeit in Minuten (Standard: 60)
       # ENERGYFORECAST_RESULT_FORMAT: "evcc"   # default oder evcc (Standard: default)
       # ENERGYFORECAST_TZ: "Europe/Berlin"     # Ausgabe-Zeitzone (IANA, optional)
+
+      # --- Dynamische Netzgebühren (§14a EnWG) ---
+      # Wenn ENERGYFORECAST_DYN_NET_OPERATOR gesetzt ist, werden zeitvariable Netzgebühren
+      # von der dynamic_energy_fees API abgerufen und ersetzen ENERGYFORECAST_FIXED_NET_COST.
+      # Verfügbare Netzbetreiber: https://mastr.github.io/dynamic_energy_fees
+      # ENERGYFORECAST_DYN_NET_OPERATOR: "syna"  # Netzbetreiber-ID (z. B. syna, bayernwerk, e-netz-suedhessen)
+      # ENERGYFORECAST_DYN_NET_COUNTRY: "de"     # Ländercode (Standard: de)
+      # ENERGYFORECAST_DYN_NET_API_URL: ""       # Nur bei Self-Hosting der dynamic_energy_fees-Instanz nötig
     ports:
       - "8000:8000"
     # Beispiel: Traefik-Integration (Labels nach Bedarf anpassen)

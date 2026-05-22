@@ -34,6 +34,7 @@ for logger_name in ['uvicorn', 'uvicorn.access', 'uvicorn.error']:
 
 APP_TITLE = "Energyforecast.de Proxy (48h/96h)"
 API_BASE = "https://www.energyforecast.de/api/v1/predictions"
+DYN_NET_API_URL_DEFAULT = "https://dyn-net.batcontrol.software/api"
 
 app = FastAPI(title=APP_TITLE)
 
@@ -45,17 +46,20 @@ def _load_simple_config() -> Optional[dict]:
     Gibt None zurück, wenn ENERGYFORECAST_TOKEN nicht gesetzt ist.
 
     Variablen:
-      ENERGYFORECAST_TOKEN            API-Token (Pflicht für Simple-Modus)
-      ENERGYFORECAST_HORIZON          48 oder 96 (Standard: 96)
-      ENERGYFORECAST_RESOLUTION       hourly | quarter_hourly (Standard: hourly)
-      ENERGYFORECAST_FIXED_NET_COST   Netzgebühren in EUR/kWh, z. B. 0.08 (Standard: 0.0)
-      ENERGYFORECAST_MARKUP_COSTS     Anbieter-Aufschlag in EUR/kWh, z. B. 0.01 (Standard: 0.0)
-      ENERGYFORECAST_FIXED_COST_OTHER Sonstige Fixkosten in EUR/kWh (Standard: 0.0)
-      ENERGYFORECAST_VAT              z. B. 0.19 oder 19 (Standard: 0.19)
-      ENERGYFORECAST_PRICE_CAP        EUR/kWh, optional
-      ENERGYFORECAST_CACHE_TTL        Minuten (Standard: 60)
-      ENERGYFORECAST_RESULT_FORMAT    default | evcc (Standard: default)
-      ENERGYFORECAST_TZ               IANA-Zeitzone, z. B. Europe/Berlin (optional)
+      ENERGYFORECAST_TOKEN              API-Token (Pflicht für Simple-Modus)
+      ENERGYFORECAST_HORIZON            48 oder 96 (Standard: 96)
+      ENERGYFORECAST_RESOLUTION         hourly | quarter_hourly (Standard: hourly)
+      ENERGYFORECAST_FIXED_NET_COST     Netzgebühren in EUR/kWh, z. B. 0.08 (Standard: 0.0)
+      ENERGYFORECAST_MARKUP_COSTS       Anbieter-Aufschlag in EUR/kWh, z. B. 0.01 (Standard: 0.0)
+      ENERGYFORECAST_FIXED_COST_OTHER   Sonstige Fixkosten in EUR/kWh (Standard: 0.0)
+      ENERGYFORECAST_VAT                z. B. 0.19 oder 19 (Standard: 0.19)
+      ENERGYFORECAST_PRICE_CAP          EUR/kWh, optional
+      ENERGYFORECAST_CACHE_TTL          Minuten (Standard: 60)
+      ENERGYFORECAST_RESULT_FORMAT      default | evcc (Standard: default)
+      ENERGYFORECAST_TZ                 IANA-Zeitzone, z. B. Europe/Berlin (optional)
+      ENERGYFORECAST_DYN_NET_OPERATOR   §14a Netzbetreiber-ID, z. B. syna (optional, überschreibt fixed_net_cost)
+      ENERGYFORECAST_DYN_NET_COUNTRY    Ländercode für Netzgebühren-API (Standard: de)
+      ENERGYFORECAST_DYN_NET_API_URL    Basis-URL der dynamic_energy_fees API (Standard: DYN_NET_API_URL_DEFAULT)
     """
     token = os.getenv("ENERGYFORECAST_TOKEN")
     if not token:
@@ -76,6 +80,9 @@ def _load_simple_config() -> Optional[dict]:
         "cache_ttl_minutes": int(os.getenv("ENERGYFORECAST_CACHE_TTL", "60")),
         "resultformat": os.getenv("ENERGYFORECAST_RESULT_FORMAT", "default"),
         "tz": tz_raw if tz_raw else None,
+        "dyn_net_operator": os.getenv("ENERGYFORECAST_DYN_NET_OPERATOR"),
+        "dyn_net_country": os.getenv("ENERGYFORECAST_DYN_NET_COUNTRY", "de"),
+        "dyn_net_api_url": os.getenv("ENERGYFORECAST_DYN_NET_API_URL", DYN_NET_API_URL_DEFAULT),
     }
 
 
@@ -97,6 +104,14 @@ def _init_simple_config():
             f"format={_SIMPLE_CONFIG['resultformat']}, "
             f"tz={_SIMPLE_CONFIG['tz']}"
         )
+        if _SIMPLE_CONFIG.get("dyn_net_operator"):
+            logger.info(
+                f"Dynamische Netzgebühren aktiv: operator={_SIMPLE_CONFIG['dyn_net_operator']}, "
+                f"country={_SIMPLE_CONFIG['dyn_net_country']}, "
+                f"api_url={_SIMPLE_CONFIG['dyn_net_api_url']}"
+            )
+        else:
+            logger.info("Dynamische Netzgebühren inaktiv (ENERGYFORECAST_DYN_NET_OPERATOR nicht gesetzt)")
     else:
         logger.info("Simple-Modus inaktiv (ENERGYFORECAST_TOKEN nicht gesetzt)")
 
@@ -166,6 +181,10 @@ _cache_lock = threading.Lock()
 _cache_stats = {"hits": 0, "misses": 0}
 _request_counts: Dict[str, int] = {"prices": 0, "current": 0}
 
+_fee_cache: Dict[tuple, dict] = {}
+_fee_cache_lock = threading.Lock()
+_fee_cache_stats = {"hits": 0, "misses": 0}
+
 
 def _in_no_cache_window() -> bool:
     """True zwischen 12:00:00 UTC und 13:29:59 UTC (kein Caching)."""
@@ -216,6 +235,104 @@ def _fetch_prices_from_api(
         out.append({"start": start, "end": end, "value": value})
     logger.info(f"Successfully fetched {len(out)} price entries")
     return out
+
+
+# ---------- Dynamische Netzgebühren ----------
+def _fetch_net_fees(api_url: str, operator: str, country: str, next_hours: int) -> List[dict]:
+    """Holt zeitvariable Netzgebühren-Slots von der dynamic_energy_fees-API.
+    Timestamps werden sofort zu UTC normalisiert (als datetime-Objekte)."""
+    params = {"country": country, "operator": operator, "next_hours": next_hours}
+    logger.info(f"Fetching dynamic net fees from {api_url}: operator={operator}, country={country}")
+    try:
+        resp = requests.get(api_url, params=params, timeout=15)
+    except requests.RequestException as e:
+        raise RuntimeError(f"Dynamic fee API request failed: {e}") from e
+    if resp.status_code != 200:
+        raise RuntimeError(f"Dynamic fee API returned {resp.status_code}: {resp.text[:300]}")
+    try:
+        data = resp.json()
+        if not isinstance(data, list):
+            raise ValueError("Expected a JSON array from fee API.")
+    except ValueError as e:
+        raise RuntimeError(f"Invalid JSON from fee API: {e}") from e
+    slots = []
+    for item in data:
+        start_dt = datetime.fromisoformat(item["start"]).astimezone(timezone.utc)
+        end_dt = datetime.fromisoformat(item["end"]).astimezone(timezone.utc)
+        slots.append({"start": start_dt, "end": end_dt, "value": float(item["value"])})
+    logger.info(f"Fetched {len(slots)} dynamic fee slots")
+    return slots
+
+
+def _get_net_fees_cached(
+    api_url: str, operator: str, country: str, next_hours: int, ttl_minutes: int
+) -> List[dict]:
+    """Gibt gecachte Fee-Slots zurück. Wirft RuntimeError bei API-Fehler (kein Fallback)."""
+    key = (api_url, operator, country, next_hours)
+    now_bucket = _ttl_bucket(ttl_minutes)
+    with _fee_cache_lock:
+        entry = _fee_cache.get(key)
+    if entry is not None and entry["bucket"] == now_bucket:
+        _fee_cache_stats["hits"] += 1
+        return entry["data"]
+    _fee_cache_stats["misses"] += 1
+    data = _fetch_net_fees(api_url, operator, country, next_hours)
+    with _fee_cache_lock:
+        _fee_cache[key] = {"data": data, "bucket": now_bucket}
+    return data
+
+
+def _resolve_net_cost_for_slot(price_start_str: str, fee_slots: List[dict], fallback: float = 0.0) -> float:
+    """Sucht den passenden Fee-Slot für einen Preis-Slot-Startzeitpunkt."""
+    s = price_start_str
+    price_start = datetime.fromisoformat(
+        s[:-1] + "+00:00" if s.endswith("Z") else s
+    ).astimezone(timezone.utc)
+    for slot in fee_slots:
+        if slot["start"] <= price_start < slot["end"]:
+            return slot["value"]
+    logger.debug(f"No fee slot found for {price_start_str}, using fallback {fallback}")
+    return fallback
+
+
+def _apply_costs_dynamic(
+    raw_prices: List[dict],
+    fee_slots: List[dict],
+    markup_costs: float,
+    fixed_cost_other: float,
+    vat: float,
+    fallback_net_cost: float = 0.0,
+) -> List[dict]:
+    """Wie _apply_costs(), aber mit zeitslot-genauer Netzgebühr aus fee_slots.
+    Formel: (spot + net_fee + markup_costs + fixed_cost_other) * (1 + vat)"""
+    vat_factor = (vat / 100.0) if vat > 1.0 else vat
+    result = []
+    for p in raw_prices:
+        net_fee = _resolve_net_cost_for_slot(p["start"], fee_slots, fallback=fallback_net_cost)
+        total_fixed = net_fee + markup_costs + fixed_cost_other
+        result.append({**p, "value": round((p["value"] + total_fixed) * (1 + vat_factor), 6)})
+    return result
+
+
+def _select_costs(
+    raw_prices: List[dict],
+    fixed_net_cost: float,
+    markup_costs: float,
+    fixed_cost_other: float,
+    vat: float,
+    dyn_net_operator: Optional[str],
+    dyn_net_country: str,
+    dyn_net_api_url: str,
+    horizon: int,
+    cache_ttl_minutes: int,
+) -> List[dict]:
+    """Wendet statische oder dynamische Netzgebühren an – je nachdem ob dyn_net_operator gesetzt ist."""
+    if dyn_net_operator:
+        fee_slots = _get_net_fees_cached(
+            dyn_net_api_url, dyn_net_operator, dyn_net_country, horizon, cache_ttl_minutes
+        )
+        return _apply_costs_dynamic(raw_prices, fee_slots, markup_costs, fixed_cost_other, vat)
+    return _apply_costs(raw_prices, fixed_net_cost, markup_costs, fixed_cost_other, vat)
 
 
 # ---------- Cache-bewusster Abruf ----------
@@ -311,6 +428,9 @@ def index():
     <tr><td><code>ENERGYFORECAST_CACHE_TTL</code></td><td>60</td><td>Cache-Gültigkeit in Minuten</td></tr>
     <tr><td><code>ENERGYFORECAST_RESULT_FORMAT</code></td><td>default</td><td><code>default</code> oder <code>evcc</code></td></tr>
     <tr><td><code>ENERGYFORECAST_TZ</code></td><td>–</td><td>Ausgabe-Zeitzone, z.&nbsp;B. <code>Europe/Berlin</code></td></tr>
+    <tr><td><code>ENERGYFORECAST_DYN_NET_OPERATOR</code></td><td>–</td><td>§14a EnWG Netzbetreiber-ID (z.&nbsp;B. <code>syna</code>). Aktiviert zeitvariable Netzgebühren, überschreibt <code>ENERGYFORECAST_FIXED_NET_COST</code>.</td></tr>
+    <tr><td><code>ENERGYFORECAST_DYN_NET_COUNTRY</code></td><td>de</td><td>Ländercode für die Netzgebühren-API</td></tr>
+    <tr><td><code>ENERGYFORECAST_DYN_NET_API_URL</code></td><td><code>https://dyn-net.batcontrol.software/api</code></td><td>Nur bei Self-Hosting der dynamic_energy_fees-Instanz nötig</td></tr>
   </table>
 
   <h2>Parameter <code>/prices</code></h2>
@@ -327,6 +447,9 @@ def index():
     <tr><td><code>cache_ttl_minutes</code></td><td>int</td><td>60</td><td>Cache-Gültigkeit in Minuten (1–1440). Zwischen 12:00 und 13:30 UTC wird der Cache immer umgangen.</td></tr>
     <tr><td><code>resultformat</code></td><td>string</td><td>default</td><td>Ausgabeformat – siehe unten</td></tr>
     <tr><td><code>tz</code></td><td>string</td><td>–</td><td>Ausgabe-Zeitzone für Zeitstempel (IANA-Name, z.&nbsp;B. <code>Europe/Berlin</code> oder <code>UTC</code>). Standard: <code>UTC</code> bei <code>default</code>-Format, Original-Offset der API bei <code>evcc</code>.</td></tr>
+    <tr><td><code>dyn_net_operator</code></td><td>string</td><td>–</td><td>§14a EnWG Netzbetreiber-ID (z.&nbsp;B. <code>syna</code>). Aktiviert zeitvariable Netzgebühren, überschreibt <code>fixed_net_cost</code>.</td></tr>
+    <tr><td><code>dyn_net_country</code></td><td>string</td><td>de</td><td>Ländercode für die Netzgebühren-API</td></tr>
+    <tr><td><code>dyn_net_api_url</code></td><td>string</td><td><em>Default-URL</em></td><td>Basis-URL der dynamic_energy_fees API (überschreibbar für Self-Hosting)</td></tr>
   </table>
 
   <h2>Ausgabeformat: <code>resultformat</code></h2>
@@ -382,6 +505,11 @@ def get_prices(
     tz: Optional[str] = Query(
         None, description="Ausgabe-Zeitzone für Zeitstempel (z. B. 'Europe/Berlin', 'UTC'). Standard: UTC für default-Format, Original-Offset für evcc."
     ),
+    dyn_net_operator: Optional[str] = Query(
+        None, description="§14a EnWG Netzbetreiber-ID (z. B. 'syna'). Aktiviert zeitvariable Netzgebühren, überschreibt fixed_net_cost."
+    ),
+    dyn_net_country: str = Query("de", description="Ländercode für die dynamic_energy_fees API (Standard: de)"),
+    dyn_net_api_url: str = Query(DYN_NET_API_URL_DEFAULT, description="Basis-URL der dynamic_energy_fees API"),
 ):
     """
     Proxy für:
@@ -424,7 +552,10 @@ def get_prices(
             api_url, resolution_api, token, output_tz, cache_ttl_minutes,
             skip_cache_read=_in_no_cache_window(),
         )
-        prices = _apply_costs(raw_prices, fixed_net_cost, markup_costs, fixed_cost_other, vat)
+        prices = _select_costs(
+            raw_prices, fixed_net_cost, markup_costs, fixed_cost_other, vat,
+            dyn_net_operator, dyn_net_country, dyn_net_api_url, horizon, cache_ttl_minutes,
+        )
 
         if price_cap is not None:
             prices = [
@@ -474,6 +605,11 @@ def get_current(
     tz: Optional[str] = Query(
         None, description="Ausgabe-Zeitzone für Zeitstempel (z. B. 'Europe/Berlin', 'UTC'). Standard: UTC für default-Format, Original-Offset für evcc."
     ),
+    dyn_net_operator: Optional[str] = Query(
+        None, description="§14a EnWG Netzbetreiber-ID (z. B. 'syna'). Aktiviert zeitvariable Netzgebühren, überschreibt fixed_net_cost."
+    ),
+    dyn_net_country: str = Query("de", description="Ländercode für die dynamic_energy_fees API (Standard: de)"),
+    dyn_net_api_url: str = Query(DYN_NET_API_URL_DEFAULT, description="Basis-URL der dynamic_energy_fees API"),
 ):
     """
     Gibt den Strompreis für den aktuellen Zeitpunkt zurück.
@@ -500,7 +636,10 @@ def get_current(
             api_url, resolution_api, token, output_tz, cache_ttl_minutes,
             skip_cache_read=False,
         )
-        prices = _apply_costs(raw_prices, fixed_net_cost, markup_costs, fixed_cost_other, vat)
+        prices = _select_costs(
+            raw_prices, fixed_net_cost, markup_costs, fixed_cost_other, vat,
+            dyn_net_operator, dyn_net_country, dyn_net_api_url, horizon, cache_ttl_minutes,
+        )
 
         if price_cap is not None:
             prices = [{**p, "value": min(p["value"], price_cap)} for p in prices]
@@ -545,7 +684,13 @@ def _apply_simple_request(cfg: dict) -> List[dict]:
         output_tz, cfg["cache_ttl_minutes"],
         skip_cache_read=_in_no_cache_window(),
     )
-    prices = _apply_costs(raw_prices, cfg["fixed_net_cost"], cfg["markup_costs"], cfg["fixed_cost_other"], cfg["vat"])
+    prices = _select_costs(
+        raw_prices,
+        cfg["fixed_net_cost"], cfg["markup_costs"], cfg["fixed_cost_other"], cfg["vat"],
+        cfg.get("dyn_net_operator"), cfg.get("dyn_net_country", "de"),
+        cfg.get("dyn_net_api_url", DYN_NET_API_URL_DEFAULT),
+        cfg["horizon"], cfg["cache_ttl_minutes"],
+    )
 
     if cfg["price_cap"] is not None:
         prices = [{**p, "value": min(p["value"], cfg["price_cap"])} for p in prices]
@@ -613,7 +758,13 @@ def simple_current(
             output_tz, cfg["cache_ttl_minutes"],
             skip_cache_read=False,
         )
-        prices = _apply_costs(raw_prices, cfg["fixed_net_cost"], cfg["markup_costs"], cfg["fixed_cost_other"], cfg["vat"])
+        prices = _select_costs(
+            raw_prices,
+            cfg["fixed_net_cost"], cfg["markup_costs"], cfg["fixed_cost_other"], cfg["vat"],
+            cfg.get("dyn_net_operator"), cfg.get("dyn_net_country", "de"),
+            cfg.get("dyn_net_api_url", DYN_NET_API_URL_DEFAULT),
+            cfg["horizon"], cfg["cache_ttl_minutes"],
+        )
 
         if cfg["price_cap"] is not None:
             prices = [{**p, "value": min(p["value"], cfg["price_cap"])} for p in prices]
@@ -644,12 +795,17 @@ def health() -> Dict[str, Any]:
     logger.debug("Health check requested")
     with _cache_lock:
         cached_entries = len(_price_cache)
+    with _fee_cache_lock:
+        fee_cached_entries = len(_fee_cache)
     return {
         "status": "ok",
         "service": APP_TITLE,
         "cached_entries": cached_entries,
         "cache_hits": _cache_stats["hits"],
         "cache_misses": _cache_stats["misses"],
+        "fee_cache_entries": fee_cached_entries,
+        "fee_cache_hits": _fee_cache_stats["hits"],
+        "fee_cache_misses": _fee_cache_stats["misses"],
         "no_cache_window_active": _in_no_cache_window(),
         "request_counts": dict(_request_counts),
         "timestamp": datetime.utcnow().isoformat() + "Z",
