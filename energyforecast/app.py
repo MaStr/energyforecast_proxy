@@ -267,7 +267,7 @@ def _fetch_net_fees(api_url: str, operator: str, country: str, next_hours: int) 
 def _get_net_fees_cached(
     api_url: str, operator: str, country: str, next_hours: int, ttl_minutes: int
 ) -> List[dict]:
-    """Gibt gecachte Fee-Slots zurück; bei Fehler leere Liste (Fallback auf fixed_net_cost)."""
+    """Gibt gecachte Fee-Slots zurück. Wirft RuntimeError bei API-Fehler (kein Fallback)."""
     key = (api_url, operator, country, next_hours)
     now_bucket = _ttl_bucket(ttl_minutes)
     with _fee_cache_lock:
@@ -276,11 +276,7 @@ def _get_net_fees_cached(
         _fee_cache_stats["hits"] += 1
         return entry["data"]
     _fee_cache_stats["misses"] += 1
-    try:
-        data = _fetch_net_fees(api_url, operator, country, next_hours)
-    except RuntimeError as e:
-        logger.warning(f"Dynamic fee fetch failed, falling back to fixed_net_cost: {e}")
-        return []
+    data = _fetch_net_fees(api_url, operator, country, next_hours)
     with _fee_cache_lock:
         _fee_cache[key] = {"data": data, "bucket": now_bucket}
     return data
@@ -335,10 +331,7 @@ def _select_costs(
         fee_slots = _get_net_fees_cached(
             dyn_net_api_url, dyn_net_operator, dyn_net_country, horizon, cache_ttl_minutes
         )
-        return _apply_costs_dynamic(
-            raw_prices, fee_slots, markup_costs, fixed_cost_other, vat,
-            fallback_net_cost=fixed_net_cost,
-        )
+        return _apply_costs_dynamic(raw_prices, fee_slots, markup_costs, fixed_cost_other, vat)
     return _apply_costs(raw_prices, fixed_net_cost, markup_costs, fixed_cost_other, vat)
 
 
