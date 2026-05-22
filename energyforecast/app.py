@@ -83,6 +83,7 @@ def _ttl_bucket(ttl_minutes: int) -> int:
 _price_cache: Dict[tuple, dict] = {}
 _cache_lock = threading.Lock()
 _cache_stats = {"hits": 0, "misses": 0}
+_request_counts: Dict[str, int] = {"prices": 0, "current": 0}
 
 
 def _in_no_cache_window() -> bool:
@@ -306,6 +307,7 @@ def get_prices(
             logger.warning(f"Invalid horizon requested: {horizon}")
             raise HTTPException(status_code=400, detail="horizon must be 48 or 96")
 
+        _request_counts["prices"] += 1
         logger.info(f"Request: horizon={horizon}, resolution={resolution}, fixed_cost={fixed_cost}, vat={vat}")
         api_url = _endpoint_for_horizon(horizon)
         resolution_api = _res_to_api(resolution)
@@ -377,6 +379,7 @@ def get_current(
     { "start": "...Z", "end": "...Z", "value": <EUR/kWh> }
     """
     try:
+        _request_counts["current"] += 1
         if horizon not in (48, 96):
             raise HTTPException(status_code=400, detail="horizon must be 48 or 96")
 
@@ -427,6 +430,7 @@ def health() -> Dict[str, Any]:
         "cache_hits": _cache_stats["hits"],
         "cache_misses": _cache_stats["misses"],
         "no_cache_window_active": _in_no_cache_window(),
+        "request_counts": dict(_request_counts),
         "timestamp": datetime.utcnow().isoformat() + "Z",
     }
 
