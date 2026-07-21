@@ -9,9 +9,13 @@ services:
       # --- Pflicht ---
       ENERGYFORECAST_TOKEN: "dein-token"
 
+      # --- Marktzone ---
+      # ENERGYFORECAST_MARKET_ZONE: "DE-LU"   # Marktzone (DE/LU -> DE-LU, AT, FR, NL, BE, ...; Standard: DE-LU)
+
       # --- Zeithorizont & Auflösung ---
-      # ENERGYFORECAST_HORIZON: "96"           # 48 oder 96 Stunden (Standard: 96)
-      # ENERGYFORECAST_RESOLUTION: "hourly"    # hourly oder quarter_hourly (Standard: hourly)
+      # ENERGYFORECAST_HORIZON: "0"            # Max. Stunden zurückgeben; 0 = alle verfügbaren Daten (Standard: 0)
+      # ENERGYFORECAST_RESOLUTION: "hourly"    # hourly (Stunden-Aggregation) oder quarter_hourly (native 15-min; Standard: hourly)
+      # ENERGYFORECAST_USE_TOTAL_PRICE: "false" # true: API-seitig berechneten Gesamtpreis nutzen (ignoriert lokale Kosten)
 
       # --- Preisberechnung ---
       # Formel: (spot + fixed_net_cost + markup_costs + fixed_cost_other) × (1 + vat)
